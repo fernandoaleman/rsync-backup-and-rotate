@@ -1,0 +1,237 @@
+#!/bin/bash
+#
+# This script creates rsync backups of a server
+#
+# Original author: Mattanja Kern
+# Original source: https://github.com/mattanja/rsync-backup-and-rotate
+#
+
+###############################################################################
+# CONFIGURATION
+###############################################################################
+
+# check drive space available before running backup?
+CHECK_DRIVE_SPACE_AVAILABLE=true
+
+# available drive space percentage needed to run backup
+AVAILABLE_DRIVE_SPACE_PERCENTAGE_NEEDED=10
+
+# path to exclude file with patterns that should not be backed up
+EXCLUDES=~/.rsync-exclude
+
+# additional rsync options
+RSYNC_OPTIONS=""
+
+# remote or local source data path
+DATA_PATH=/
+
+# local destination backup path
+BACKUP_PATH=~/backup
+
+# show what would have been transferred
+DRY_RUN=false
+
+###############################################################################
+# DO NOT EDIT ANYTHING BELOW THIS LINE
+###############################################################################
+
+echo_log() {
+  echo "$1" "$2"
+  logger "$1" "$2"
+}
+
+usage() {
+  echo "backup-rsync"
+  echo "This script creates rsync backups of a server."
+  echo
+  echo "backup-rsync comes with ABSOLUTELY NO WARRANTY. Use at your own risk."
+  echo
+  echo "Usage: backup-rsync [OPTION(S)]... <fqdn|hostname|localhost>"
+  echo
+  echo "Options"
+  echo "  -a,    available drive space percentage needed to run backup"
+  echo "  -b,    local destination backup path"
+  echo "  -c,    check drive space available before running backup?"
+  echo "  -e,    path to exclude file with patterns that should not be backed up"
+  echo "  -n,    show what would have been transferred"
+  echo "  -o,    additional rsync options"
+  echo "  -p,    remote or local source data path"
+  echo "  -s,    ssh address to remote server <user@hostname>"
+  echo "  -h,    help and usage instructions"
+  echo
+}
+
+# Read parameter options
+OPTIND=1
+while getopts ":a:b:c:e:no:p:s:h" opt; do
+  case "$opt" in
+    a)
+      AVAILABLE_DRIVE_SPACE_PERCENTAGE_NEEDED="$OPTARG"
+      ;;
+    b)
+      BACKUP_PATH="$OPTARG"
+      ;;
+    c)
+      CHECK_DRIVE_SPACE_AVAILABLE="$OPTARG"
+      ;;
+    e)
+      EXCLUDES="$OPTARG"
+      ;;
+    n)
+      DRY_RUN=true
+      ;;
+    o)
+      RSYNC_OPTIONS="$OPTARG"
+      ;;
+    p)
+      DATA_PATH="$OPTARG"
+      ;;
+    s)
+      SSH_ADDRESS="$OPTARG"
+      ;;
+    h)
+      usage
+      exit
+      ;;
+    \?)
+      echo_log "Invalid option: -$OPTARG" >&2
+      echo
+      usage
+      exit 1
+      ;;
+    :)
+      echo_log "Option -$OPTARG requires an argument." >&2
+      echo
+      usage
+      exit 1
+      ;;
+  esac
+done
+shift "$((OPTIND-1))"
+
+###############################################################################
+# ERROR VALIDATIONS
+###############################################################################
+
+# The first parameter after options must be the FQDN or hostname of the server
+if [ -n "$1" ] ; then
+  TARGET="$1"
+else
+  echo_log "Error: $0 requires <fqdn|hostname|localhost>"
+  echo
+  usage
+  exit 1
+fi
+
+if [ -n "$SSH_ADDRESS" ] && [ "$TARGET" == "localhost" ] ; then
+  echo_log "Error: Your target cannot be localhost when using ssh"
+  echo
+  usage
+  exit 1
+fi
+
+if ! [ -d "$BACKUP_PATH" ] ; then
+  echo_log "Error: backup path $BACKUP_PATH does not exist"
+  echo
+  usage
+  exit 1
+fi
+
+if [[ $DATA_PATH == "/" && ! -f "$EXCLUDES" ]]; then
+  echo_log "Error: exclude file $EXCLUDES does not exist"
+  echo
+  usage
+  exit 1
+fi
+
+# Check disk space
+if $CHECK_DRIVE_SPACE_AVAILABLE ; then
+  DRIVE_FREE=$((100 - AVAILABLE_DRIVE_SPACE_PERCENTAGE_NEEDED))
+  KB_IS_FREE=$(df -Pk "$BACKUP_PATH" | tail -n1 | awk '{ print $5 }' | sed 's/[^0-9]*//g')
+  INODE_IS_FREE=$(df -iPk "$BACKUP_PATH" | tail -n1 | awk '{ print $5 }' | sed 's/[^0-9]*//g')
+
+  if [ "$KB_IS_FREE" -ge "$DRIVE_FREE" ] || [ "$INODE_IS_FREE" -ge "$DRIVE_FREE" ] ; then
+    echo_log "Fatal: Not enough space left for rsyncing backups!"
+    exit 1
+  fi
+fi
+
+###############################################################################
+# BACKUP
+###############################################################################
+
+# Create backup directory
+if ! [ -d "$BACKUP_PATH/$TARGET/daily.0" ] ; then
+  mkdir -p "$BACKUP_PATH/$TARGET/daily.0"
+fi
+
+SECONDS=0
+echo_log "$(date +"%Y/%m/%d %T") Begin backup"
+echo
+
+echo_log "Target: $TARGET"
+echo_log "Data path: $DATA_PATH"
+echo_log "Backup path: $BACKUP_PATH"
+echo
+
+PARAMS=(-azv --numeric-ids -e ssh --delete --delete-excluded --out-format="%t %f")
+
+if [ -f "$EXCLUDES" ]; then
+  echo_log "Using excludelist: $EXCLUDES"
+  PARAMS+=(--exclude-from="$EXCLUDES")
+fi
+
+if [ "$RSYNC_OPTIONS" != "" ]; then
+  echo_log "Extra options: $RSYNC_OPTIONS"
+  PARAMS+=("$RSYNC_OPTIONS")
+fi
+
+if [ -n "$SSH_ADDRESS" ] ; then
+  DATA_PATH="$SSH_ADDRESS:$DATA_PATH"
+elif [ "$TARGET" != "localhost" ] ; then
+  DATA_PATH="$TARGET:$DATA_PATH"
+fi
+
+# Check whether or not the $DATA_PATH ends in a forward slash
+if [[ "$DATA_PATH" != */ ]]; then
+  DATA_PATH="$DATA_PATH/"
+fi
+
+echo_log "Running rsync backup from $TARGET..."
+
+if $DRY_RUN; then
+  echo_log "(This is a dry run. Your data is safe!)"
+  PARAMS+=("--dry-run")
+fi
+echo
+
+PARAMS+=("$DATA_PATH" "$BACKUP_PATH/$TARGET/daily.0/")
+
+echo "rsync" "${PARAMS[@]}"
+echo
+
+sleep 1
+
+rsync "${PARAMS[@]}"
+EXIT_CODE=$?
+
+# Validate return code
+# 0 = no error,
+# 24 is fine, happens when files are being touched during sync (logs etc)
+# all other codes are fatal -- see man (1) rsync
+if ! [[ $EXIT_CODE == 24 ||  $EXIT_CODE == 0 ]] ; then
+  echo_log "Fatal: rsync finished $TARGET with errors!"
+fi
+
+# Touch dir to set backup date
+touch "$BACKUP_PATH/$TARGET/daily.0"
+
+# Sync disks to make sure data is written to disk
+sync
+
+echo
+echo_log "$(date +"%Y/%m/%d %T") End backup"
+
+ELAPSED="Elapsed: $((SECONDS / 3600))hrs $(((SECONDS / 60) % 60))min $((SECONDS % 60))sec"
+echo_log "$ELAPSED"
+echo
