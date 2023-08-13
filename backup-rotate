@@ -1,0 +1,175 @@
+#!/bin/bash
+#
+# This script rotates the backup directories
+#
+# Original author: Mattanja Kern
+# Original source: https://github.com/mattanja/rsync-backup-and-rotate
+#
+
+###############################################################################
+# CONFIGURATION
+###############################################################################
+
+# check drive space available before rotating backup?
+CHECK_DRIVE_SPACE_AVAILABLE=true
+
+# available drive space percentage needed to rotate backup
+AVAILABLE_DRIVE_SPACE_PERCENTAGE_NEEDED=10
+
+# local destination backup path
+BACKUP_PATH=~/backup
+
+###############################################################################
+# DO NOT EDIT ANYTHING BELOW THIS LINE
+###############################################################################
+
+echo_log() {
+  echo "$1" "$2"
+  logger "$1" "$2"
+}
+
+usage() {
+  echo "backup-rotate"
+  echo "This script creates rsync backups of a server."
+  echo
+  echo "backup-rotate comes with ABSOLUTELY NO WARRANTY. Use at your own risk."
+  echo
+  echo "Usage: backup-rotate [OPTION(S)]... <fqdn|hostname|localhost>"
+  echo
+  echo "Options"
+  echo "  -a,    available drive space percentage needed to rotate backup"
+  echo "  -b,    local destination backup path"
+  echo "  -c,    check drive space available before rotating backup?"
+  echo "  -h,    help and usage instructions"
+  echo
+}
+
+# Read parameter options
+OPTIND=1
+while getopts ":a:b:c:h" opt; do
+  case "$opt" in
+    a)
+      AVAILABLE_DRIVE_SPACE_PERCENTAGE_NEEDED="$OPTARG"
+      ;;
+    b)
+      BACKUP_PATH="$OPTARG"
+      ;;
+    c)
+      CHECK_DRIVE_SPACE_AVAILABLE="$OPTARG"
+      ;;
+    h)
+      usage
+      exit
+      ;;
+    \?)
+      echo_log "Invalid option: -$OPTARG" >&2
+      echo
+      usage
+      exit 1
+      ;;
+    :)
+      echo_log "Option -$OPTARG requires an argument." >&2
+      echo
+      usage
+      exit 1
+      ;;
+  esac
+done
+shift "$((OPTIND-1))"
+
+###############################################################################
+# ERROR VALIDATIONS
+###############################################################################
+
+# The first parameter after options must be the FQDN or hostname of the server
+if [ -n "$1" ] ; then
+  TARGET="$1"
+else
+  echo_log "Error: $0 requires <fqdn|hostname|localhost>"
+  echo
+  usage
+  exit 1
+fi
+
+if ! [ -d "$BACKUP_PATH" ] ; then
+  echo_log "Error: backup path $BACKUP_PATH does not exist"
+  echo
+  usage
+  exit 1
+fi
+
+# Check disk space
+if $CHECK_DRIVE_SPACE_AVAILABLE ; then
+  DRIVE_FREE=$((100 - AVAILABLE_DRIVE_SPACE_PERCENTAGE_NEEDED))
+  KB_IS_FREE=$(df -Pk "$BACKUP_PATH" | tail -n1 | awk '{ print $5 }' | sed 's/[^0-9]*//g')
+  INODE_IS_FREE=$(df -iPk "$BACKUP_PATH" | tail -n1 | awk '{ print $5 }' | sed 's/[^0-9]*//g')
+
+  if [ "$KB_IS_FREE" -ge "$DRIVE_FREE" ] || [ "$INODE_IS_FREE" -ge "$DRIVE_FREE" ] ; then
+    echo_log "Fatal: Not enough space left for rsyncing backups!"
+    exit 1
+  fi
+fi
+
+###############################################################################
+# ROTATE BACKUP DIRECTORIES
+###############################################################################
+
+# Create backup directory
+if ! [ -d "$BACKUP_PATH/$TARGET/daily.0" ] ; then
+  mkdir -p "$BACKUP_PATH/$TARGET/daily.0"
+fi
+
+SECONDS=0
+echo_log "$(date +"%Y/%m/%d %T") Begin backup rotation"
+echo
+
+echo_log "Target: $TARGET"
+echo_log "Backup path: $BACKUP_PATH"
+echo
+
+# Delete oldest daily backup
+if [ -d "$BACKUP_PATH/$TARGET/daily.7" ] ; then
+  rm -rf "$BACKUP_PATH/$TARGET/daily.7"
+fi
+
+# Shift all other daily backups ahead one day
+for OLD in 6 5 4 3 2 1; do
+  if [ -d "$BACKUP_PATH/$TARGET/daily.$OLD" ] ; then
+    NEW=$((OLD+1))
+
+    echo_log "Moving $BACKUP_PATH/$TARGET/daily.$OLD to $BACKUP_PATH/$TARGET/daily.$NEW"
+
+    # Backup last edate
+    # On a Mac, changing timestamp from file creates a "-r" file, so skip for now
+
+    if [ "$(uname)" != "Darwin" ]; then
+      touch "$BACKUP_PATH/.timestamp" -r "$BACKUP_PATH/$TARGET/daily.$OLD"
+    fi
+
+    mv "$BACKUP_PATH/$TARGET/daily.$OLD" "$BACKUP_PATH/$TARGET/daily.$NEW"
+
+    # Restore timestamp
+    if [ "$(uname)" != "Darwin" ]; then
+      touch "$BACKUP_PATH/$TARGET/daily.$NEW" -r "$BACKUP_PATH/.timestamp"
+    fi
+  fi
+done
+
+# Copy files from daily.0 to daily.1 (before updating daily.0 via rsync)
+if [ -d "$BACKUP_PATH/$TARGET/daily.0" ] ; then
+  echo_log "Copying files from $BACKUP_PATH/$TARGET/daily.0 to $BACKUP_PATH/$TARGET/daily.1"
+
+  # On a Mac, copy files without hardlinks due to a "Bad file descriptor" error
+  if [ "$(uname)" == "Darwin" ]; then
+    cp -Rf "$BACKUP_PATH/$TARGET/daily.0/." "$BACKUP_PATH/$TARGET/daily.1/"
+  else
+    cp -al "$BACKUP_PATH/$TARGET/daily.0/." "$BACKUP_PATH/$TARGET/daily.1/"
+  fi
+fi
+
+echo
+echo_log "$(date +"%Y/%m/%d %T") End backup rotation"
+
+ELAPSED="Elapsed: $((SECONDS / 3600))hrs $(((SECONDS / 60) % 60))min $((SECONDS % 60))sec"
+echo_log "$ELAPSED"
+echo

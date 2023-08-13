@@ -40,3 +40,20 @@ log/*
 ```
 
 The backup will be written into the directory `/backup/path/<fqdn|hostname|localhost>/daily.0/`
+
+### backup-rotate
+
+```
+backup-rotate
+This script creates rsync backups of a server.
+
+backup-rotate comes with ABSOLUTELY NO WARRANTY. Use at your own risk.
+
+Usage: backup-rotate [OPTION(S)]... <fqdn|hostname|localhost>
+
+Options
+  -a,    available drive space percentage needed to rotate backup
+  -b,    local destination backup path
+  -c,    check drive space available before rotating backup?
+  -h,    help and usage instructions
+```
