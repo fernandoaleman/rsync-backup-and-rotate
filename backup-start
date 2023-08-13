@@ -1,0 +1,19 @@
+#!/bin/bash
+#
+# This script rotates the backup directories
+#
+# Original author: Mattanja Kern
+# Original source: https://github.com/mattanja/rsync-backup-and-rotate
+#
+
+###############################################################################
+# README
+###############################################################################
+#
+# Please make sure and modify the commands below with options
+# to your specific backup and rotation needs
+#
+###############################################################################
+
+backup-rotate -b /backup/path hostname >> /backup/path/logs/backup-rotate-hostname.log
+backup-rsync -p /data/path -b /backup/path -e /excludelist/path hostname &> /backup/path/logs/backup-rsync-hostname.log
